@@ -1,0 +1,75 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+displayName: Codex over ACP
+author: "Docker, Inc."
+description: >-
+  A sandbox an ACP client can drive: a shell base, Codex CLI, and the
+  Agent Client Protocol adapter that fronts it — published as one kit.
+  The same three kits compose by hand; this exists so an editor can be
+  pointed at one reference instead of three that have to agree.
+sourceUrl: https://github.com/docker/sandbox-kit-spec
+licenses: [Apache-2.0]
+
+kind: set
+version: "1.0.7"
+
+args:
+  # The kits below are published references, so the namespace they live
+  # under is the one thing this file cannot hardcode. A build-phase arg
+  # is its home: the value is expanded into the kits list before the
+  # merge resolves anything, and baked into the published descriptor.
+  registry:
+    default: docker.io/docker
+    # A colon lets a registry carry a port; localhost:5000 is useful
+    # when publishing the component kits for local set builds.
+    pattern: '^[a-z0-9][a-z0-9._/:-]*$'
+    description: Registry namespace the listed kits were pushed to
+    buildArg: KIT_REGISTRY
+
+kits:
+  # The base. One member is a workload, so the merged kit is one too,
+  # and the set selects the agent's discovery profile below.
+  - ref: ${{ kit.args.registry }}/sbx-kit-shell:1.0.0
+
+  # Codex itself: the binary at /usr/local/bin/codex, OpenAI egress and
+  # credential, configuration hooks, and shared skills integration.
+  # The codex-acp kit admits 0.165.x and 0.166.x; keep this set inside
+  # that range when the standalone codex kits move past it.
+  - ref: ${{ kit.args.registry }}/sbx-kit-codex-mixin:0.166.0
+
+  # The ACP adapter. Its codex requirement is answered by the mixin
+  # above, which also orders the pair regardless of list order.
+  - ref: ${{ kit.args.registry }}/sbx-kit-codex-acp:2.5.0
+
+# Explain the resolved composition and the two ways to invoke Codex.
+capabilities:
+  # Offer both versions during the runtime rollout; select one.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      filename: AGENTS.md
+      directory: /home/agent/.codex
+      content: |
+        # Codex over ACP
+
+        This sandbox is a published *set*: one kit whose content was merged from
+        a shell base, Codex CLI, and the Agent Client Protocol adapter. Run
+        `cat /usr/share/sandbox/kit/codex-acp-set/kit.yaml` to see the three, each pinned
+        by digest, and `ls /usr/share/sandbox/kit/` to see their own sources
+        staged beside each other.
+
+        Two ways to work here, and they are the same agent either way:
+
+        - Interactively, `codex` — the binary at `/usr/local/bin/codex`.
+        - Over ACP, `codex-acp` on stdio, which an editor spawns and speaks the
+          protocol to. It execs the same binary, so editor-driven and terminal
+          sessions share the version, credential, configuration, and state.
+
+        The adapter opens no sockets of its own. Its egress and OpenAI credential
+        are the ones Codex already has, so the merged policy does not need a
+        second copy of either declaration.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

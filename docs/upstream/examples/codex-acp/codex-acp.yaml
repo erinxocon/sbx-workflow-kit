@@ -1,0 +1,112 @@
+# syntax=docker/sandbox-kit:3
+# The ACP (Agent Client Protocol) adapter for Codex as a MIXIN:
+# `codex-acp` speaks ACP on stdio so protocol clients (Zed and other
+# ACP-capable editors) can drive a Codex session inside the sandbox.
+# Everything environmental rides with the codex-mixin kit this one
+# requires — the OpenAI credential surface (~/.codex/auth.json,
+# config.toml), the api.openai.com and chatgpt.com egress, and the
+# config seeds — because the adapter drives that kit's codex binary
+# rather than talking to OpenAI itself. This kit contributes the
+# adapter, its Node runtime, and the one environment variable that binds
+# the two together.
+#
+# Codex needs an adapter because its CLI speaks no ACP of its own, the
+# way Claude Code does not. Agents whose own binary implements ACP
+# (cursor-agent, devin, gemini, opencode) need no kit here: their
+# workload and mixin kits already ship the binary a client drives.
+schemaVersion: "3"
+displayName: Codex ACP adapter
+author: "Docker, Inc."
+description: >-
+  The Agent Client Protocol adapter for Codex as a mixin — the codex-acp
+  stdio server with its Node runtime in an overlay, bound to the composed
+  codex binary. Layer it onto a base that composes the codex-mixin kit
+  and point an ACP client (such as Zed) at `codex-acp`.
+sourceUrl: https://github.com/agentclientprotocol/codex-acp
+licenses: [Apache-2.0]
+
+kind: mixin
+
+args:
+  version:
+    default: "2.5.0"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: codex-acp release to install
+    buildArg: ACP_VERSION
+
+provides: ["codex-acp@${{ kit.args.version }}"]
+
+# The adapter execs the sandboxed codex binary, so a composition without
+# codex yields an adapter with no agent behind it. Requiring the
+# capability rather than naming the kit keeps any codex-carrying kit
+# eligible, and it is also what makes CODEX_PATH resolvable: the
+# codex-mixin kit installs /usr/local/bin/codex.
+#
+# codex-acp 2.5.0 declares @openai/codex ^0.165.0. With the bundled
+# binary removed, the composed codex must satisfy this range instead.
+# The upper bound reaches past the adapter's declaration to 0.166.x,
+# which was tested composed with this adapter before the range was
+# widened; widen it again only after the same test.
+requires: ["codex >= 0.165.0, < 0.167.0"]
+
+# No network policy and no credential: the adapter opens no sockets of
+# its own. Its egress and auth are whatever the codex it execs already
+# has, which the codex-mixin kit declares. The package is installed at
+# build time, so unlike an `npx`-at-startup launcher this needs no
+# registry.npmjs.org access at runtime either.
+capabilities:
+  # Pinned codex-acp 2.5.0 handles stdin close but has no SIGTERM cleanup
+  # handler. SIGTERM cancellation and session flushing remain unverified;
+  # optionality governs host support, not adapter conformance.
+  - type: com.docker.sandbox/acp@1
+    optional: true
+    description: Drive codex sessions over the Agent Client Protocol
+    config:
+      agent: codex
+      command: [codex-acp]
+      # The adapter otherwise overrides native config with edit approvals
+      # and workspace-only access on each prompt.
+      env:
+        INITIAL_AGENT_MODE: agent-full-access
+
+  # Offer both versions during the runtime rollout; select one.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        ## Codex ACP adapter
+
+        `codex-acp` is installed at `/usr/local/bin/codex-acp`. It is an Agent
+        Client Protocol (ACP) server on stdio: a client spawns it and drives a
+        Codex session through the protocol. It is not an interactive command —
+        with no client on the other end of stdio it sits silent, so do not run it
+        from this shell to "check" it.
+
+        Host tools must attach it to a non-TTY stdin/stdout stream, for example
+        `sbx exec -i <sandbox> codex-acp`. In Zed, configure an agent server
+        whose command runs that.
+
+        The adapter drives the same `codex` binary this sandbox already has
+        (`CODEX_PATH=/usr/local/bin/codex`), so authentication is the surface
+        `codex` uses: the proxy-mediated OpenAI credential behind
+        `~/.codex/auth.json` and the `~/.codex/config.toml` this composition
+        seeds. If `codex` works here, the adapter works with no extra setup and
+        nothing separate to log in to. Sessions created through ACP and
+        interactive `codex` runs share the same `~/.codex` state, which this
+        composition keeps in the sandbox filesystem rather than on a volume.
+
+        The Kit declares an optional `acp@1` endpoint, so supporting hosts can
+        find the adapter without hard-coding its command. It starts in
+        `agent-full-access` mode to match the interactive Codex entrypoint.
+
+        Pinned `codex-acp` 2.5.0 handles stdin closure but has no `SIGTERM`
+        cleanup handler. Cancellation and session flushing on `SIGTERM` have
+        not been verified against `acp@1`'s shutdown guarantee. Hosts should
+        close the ACP stdin stream and allow the adapter to finish before
+        terminating it.
+        The optional declaration enables discovery; it does not certify full
+        adapter conformance.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

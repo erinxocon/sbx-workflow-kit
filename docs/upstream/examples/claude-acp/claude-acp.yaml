@@ -1,0 +1,84 @@
+# syntax=docker/sandbox-kit:3
+# The ACP (Agent Client Protocol) adapter for Claude Code as a MIXIN:
+# `claude-agent-acp` speaks ACP on stdio so protocol clients (Zed and
+# other ACP-capable editors) can drive a Claude Code session inside the
+# sandbox. Everything environmental rides with the claude-mixin kit
+# this one requires — the Anthropic credential surface
+# (~/.claude/.credentials.json, settings.json apiKeyHelper), the
+# api.anthropic.com egress, and the session-state volumes — because the
+# adapter drives that kit's claude binary rather than talking to
+# Anthropic itself. This kit contributes the adapter, its Node runtime,
+# and the one environment variable that binds the two together.
+schemaVersion: "3"
+displayName: Claude Code ACP adapter
+author: "Docker, Inc."
+description: >-
+  The Agent Client Protocol adapter for Claude Code as a mixin — the
+  claude-agent-acp stdio server with its Node runtime in an overlay,
+  bound to the composed claude binary. Layer it onto a base that
+  composes the claude-mixin kit and point an ACP client (such as Zed)
+  at `claude-agent-acp`.
+sourceUrl: https://github.com/zed-industries/claude-code-acp
+
+kind: mixin
+
+args:
+  version:
+    default: "0.99.1"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: claude-agent-acp release to install
+    buildArg: ACP_VERSION
+
+provides: ["claude-acp@${{ kit.args.version }}"]
+
+# The adapter execs the sandboxed claude binary, so a composition without
+# claude yields an adapter with no agent behind it. Requiring the
+# capability rather than naming the kit keeps any claude-carrying kit
+# eligible: the wrapper finds that kit's claude wherever it installed it
+# (/usr/local/bin for claude-mixin, $HOME/.local/bin for the workload).
+requires: ["claude"]
+
+# No network policy and no credential: the adapter opens no sockets of
+# its own. Its egress and auth are whatever the claude it execs already
+# has, which the claude-mixin kit declares. The package is installed at
+# build time, so unlike an `npx`-at-startup launcher this needs no
+# registry.npmjs.org access at runtime either.
+# The adapter reads permissions.defaultMode from the user settings that
+# claude-mixin seeds, preserving the interactive permission posture.
+capabilities:
+  - type: com.docker.sandbox/acp@1
+    optional: true
+    description: Drive claude sessions over the Agent Client Protocol
+    config:
+      agent: claude
+      command: [claude-agent-acp]
+
+  # Offer both versions during the runtime rollout; select one.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        ## Claude Code ACP adapter
+
+        `claude-agent-acp` is installed at `/usr/local/bin/claude-agent-acp`. It
+        is an Agent Client Protocol (ACP) server on stdio: a client spawns it and
+        drives a Claude Code session through the protocol. It is not an
+        interactive command — with no client on the other end of stdio it sits
+        silent, so do not run it from this shell to "check" it.
+
+        Host tools must attach it to a non-TTY stdin/stdout stream, for example
+        `sbx exec -i <sandbox> claude-agent-acp`. In Zed, configure an agent
+        server whose command runs that.
+
+        The adapter drives the same `claude` binary this sandbox already has
+        (the one `command -v claude` finds, unless `CLAUDE_CODE_EXECUTABLE`
+        names another), so authentication is
+        the surface `claude` uses: the proxy-mediated Anthropic credential in
+        `~/.claude/.credentials.json` and `~/.claude/settings.json`. If `claude`
+        works here, the adapter works with no extra setup and nothing separate to
+        log in to. Sessions created through ACP share the session-state volumes
+        with interactive `claude` runs.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

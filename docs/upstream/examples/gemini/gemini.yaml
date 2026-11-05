@@ -1,0 +1,147 @@
+# syntax=docker/sandbox-kit:3
+# Google's Gemini CLI as a WORKLOAD, migrated from the built-in v2 gemini
+# kit: the template image as content, v2's entrypoint and environment in
+# the image config, the proxy-managed Google credential, the baseline
+# settings seed, and the jq-merge MCP registration hook.
+schemaVersion: "3"
+displayName: Gemini CLI
+author: "Docker, Inc."
+description: >-
+  Google's Gemini CLI as a complete workload: the sandbox-templates base,
+  a proxy-managed Gemini API key, scoped egress, and the settings and MCP
+  seeds the agent needs.
+sourceUrl: https://github.com/google-gemini/gemini-cli
+version: "0.1.0"
+
+kind: workload
+
+provides: ["gemini"]
+
+dockerfile: ./gemini.dockerfile
+
+capabilities:
+  # This workload is an agent sandbox: the host launches the agent rather
+  # than running the image's entrypoint as PID 1, and honors the identity
+  # the image config declares instead of assuming one.
+  - type: com.docker.sandbox/sbx@1
+
+  # accounts.google.com is gemini's login flow; the googleapis hosts are
+  # the credential's inject domains, which the allow list must name. The
+  # template's apt mirrors ride with the workload.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - accounts.google.com:443
+          - aiplatform.googleapis.com:443
+          - generativelanguage.googleapis.com:443
+          - oauth2.googleapis.com:443
+          - vertexai.googleapis.com:443
+          - archive.ubuntu.com:80
+          - security.ubuntu.com:80
+          - ports.ubuntu.com:80
+          - download.docker.com:443
+
+  # proxyManaged: the value gemini sees is a sentinel; the proxy swaps
+  # the real key at the Google endpoints.
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Google AI API access (Gemini API key)
+    config:
+      service: google
+      phase: runtime
+      apiKey:
+        name: GEMINI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: aiplatform.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: generativelanguage.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: oauth2.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: vertexai.googleapis.com, header: x-goog-api-key, format: "%s"}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: mkdir -p /home/agent/.gemini && chown 1000:1000 /home/agent/.gemini && (chmod 644 /home/agent/.gemini/settings.json 2>/dev/null || true)
+          user: "0"
+          description: Ensure ~/.gemini exists with agent ownership
+      files:
+        # Baseline non-MCP settings the agent depends on; seeded only when
+        # absent, because gemini-cli and the MCP hook below both write the
+        # same file.
+        - path: /home/agent/.gemini/settings.json
+          content: '{"tools":{"sandbox":false},"security":{"disableYoloMode":false,"folderTrust":{"enabled":false}},"ui":{"useFullWidth":true}}'
+          overwrite: false
+          description: Baseline gemini settings for sandbox use
+      startup:
+        # Gateway-first MCP registration, merged with jq rather than
+        # overwritten: settings.json is shared territory, and the deep
+        # merge keeps the baseline keys while adding mcpServers. Atomic
+        # write-temp + rename so a crash mid-merge leaves the baseline
+        # intact. No-op when MCP isn't enabled.
+        - command: |
+            set -e
+            [ -n "$MCP_GATEWAY_URL" ] || exit 0
+            frag=/tmp/sandbox-mcp-gateway.json
+            jq -n --arg url "$MCP_GATEWAY_URL" --arg auth "Bearer $MCP_SENTINEL_TOKEN_NAME" \
+              '{mcpServers: {"mcp-gateway": {httpUrl: $url, headers: {Authorization: $auth}}}}' > "$frag"
+            [ -f "$HOME/.gemini/settings.json" ] || echo '{}' > "$HOME/.gemini/settings.json"
+            jq -s '.[0] * .[1]' "$HOME/.gemini/settings.json" "$frag" \
+              > "$HOME/.gemini/settings.json.tmp"
+            mv "$HOME/.gemini/settings.json.tmp" "$HOME/.gemini/settings.json"
+            rm -f "$frag"
+          user: agent
+          env: [MCP_GATEWAY_URL, MCP_SENTINEL_TOKEN_NAME]
+          description: Register the sandbox MCP gateway in ~/.gemini/settings.json
+
+  # Headless verb, so a host can drive a session without the TTY. The
+  # entry is an argv tail appended to the entrypoint's launch command.
+  - type: com.docker.sandbox/agent-sessions@1
+    config:
+      prompt: ["-p", "{{.Prompt}}"]
+
+  # Interactive verbs, for a host that puts a person at the terminal. Tails
+  # append to the entrypoint and run with a terminal attached. -i seeds the
+  # prompt and stays in the TUI, where -p would exit; a bare launch is the
+  # TUI, so newSession is omitted. gemini has no flag that opens its session
+  # browser (that is the in-app /resume), so there is no sessionPicker, and
+  # its --list-sessions output is not one id per line, so there is no list.
+  - type: com.docker.sandbox/agent-interactive-sessions@1
+    optional: true
+    config:
+      # `-i=` binds the value: a prompt starting with `-` stays a prompt.
+      prompt: ["-i={{.Prompt}}"]
+      continue: ["--resume", "latest"]
+      resume: ["--resume", "{{.SessionID}}"]
+
+  # gemini speaks ACP itself (--acp). --yolo carries the entrypoint's
+  # posture into ACP sessions, which start in the `yolo` mode and offer
+  # default, autoEdit and plan as stricter ones; that holds only because
+  # the settings seed above disables folder trust, without which gemini
+  # downgrades yolo to default. gemini stops on stdin EOF but ignores
+  # SIGTERM in ACP mode, so acp-graceful (see the dockerfile) closes its
+  # stdin on SIGTERM instead.
+  - type: com.docker.sandbox/acp@1
+    optional: true
+    description: Drive gemini sessions over the Agent Client Protocol
+    config:
+      agent: gemini
+      command: [acp-graceful, gemini, --acp, --yolo]
+
+  # gemini reads its profile as GEMINI.md, not AGENTS.md.
+  # Offer both versions during the runtime rollout; select one.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      filename: GEMINI.md
+      directory: /home/agent/.gemini
+      content: |
+        # Gemini CLI
+
+        This sandbox runs Google's Gemini CLI. The API key is proxy-managed — the
+        value in the environment is a sentinel the egress proxy swaps at the
+        Google endpoints — and ~/.gemini/settings.json is seeded for sandbox use.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context
