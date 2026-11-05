@@ -1,0 +1,147 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+displayName: Workflow tools
+description: >-
+  uv, nvm (with Node), git-lfs configured system-wide, playwright-cli (with its
+  agent skill), and the BigCommerce Stencil CLI, as an overlay for any agent
+  workload. Expects ../template for Chromium and its system libraries.
+version: "0.1.0"
+
+kind: mixin
+
+args:
+  uvVersion:
+    default: "0.13.7"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: uv release
+    buildArg: UV_VERSION
+  gitLfsVersion:
+    default: "3.8.1"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: git-lfs release
+    buildArg: GIT_LFS_VERSION
+  nvmVersion:
+    default: "0.41.0"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: nvm release
+    buildArg: NVM_VERSION
+  nodeVersion:
+    default: "24.22.2"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: Node installed via nvm. Stencil CLI 10 requires Node >= 24.
+    buildArg: NODE_VERSION
+  playwrightCliVersion:
+    default: "0.1.23"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: "@playwright/cli release"
+    buildArg: PLAYWRIGHT_CLI_VERSION
+  stencilCliVersion:
+    default: "10.1.1"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: "@bigcommerce/stencil-cli release"
+    buildArg: STENCIL_CLI_VERSION
+
+provides:
+  - "uv@${{ kit.args.uvVersion }}"
+  - "git-lfs@${{ kit.args.gitLfsVersion }}"
+  - "nvm@${{ kit.args.nvmVersion }}"
+  - "node@${{ kit.args.nodeVersion }}"
+  - "playwright-cli@${{ kit.args.playwrightCliVersion }}"
+  - "stencil-cli@${{ kit.args.stencilCliVersion }}"
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@2
+    config:
+      runtime:
+        allow:
+          # git + git-lfs over HTTPS. LFS objects are served from these.
+          - github.com
+          - github-cloud.githubusercontent.com
+          - objects.githubusercontent.com
+          - release-assets.githubusercontent.com
+          - raw.githubusercontent.com
+          # uv: package index and managed Python downloads (GitHub, above).
+          - pypi.org
+          - files.pythonhosted.org
+          # nvm install <ver>, npm, npx.
+          - nodejs.org
+          - registry.npmjs.org
+          # Playwright browser downloads/updates (the template ships Chromium).
+          - cdn.playwright.dev
+          - playwright.download.prss.microsoft.com
+          # BigCommerce: Stencil login/push/pull, the store, and its CDN.
+          - api.bigcommerce.com
+          - login.bigcommerce.com
+          - "*.bigcommerce.com"
+          - "*.mybigcommerce.com"
+
+  # Use the user's Git author identity for commits made in the sandbox.
+  - type: com.docker.sandbox/git-identity@1
+    optional: true
+    description: Attribute commits to the user's Git identity
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        # Wire git-lfs into git for every user: writes the clean/smudge/
+        # process filters and `required` into /etc/gitconfig. --skip-repo
+        # because no repo is in scope at create time.
+        - command: git lfs install --system --skip-repo
+          user: "0"
+          description: Configure git-lfs filters system-wide
+
+        # Make sure ~/.claude is agent-owned before the skills install (the
+        # runtime can create it root-owned when mounting the skills dir).
+        - command: mkdir -p /home/agent/.claude && chown agent:agent /home/agent/.claude
+          user: "0"
+          description: Ensure ~/.claude is agent-owned
+
+        # Global playwright-cli skill -> ~/.claude/skills/playwright-cli.
+        # Non-fatal: a skills problem should not block sandbox creation.
+        - command: |
+            playwright-cli install --skills -g || echo "warning: playwright-cli skills install failed" >&2
+          user: agent
+          description: Install the playwright-cli agent skill globally
+
+        # playwright-cli defaults to the Google Chrome channel, which the
+        # template doesn't ship (and Chrome has no Linux arm64 build). Point it
+        # at bundled Chromium in the global config, the lowest-precedence
+        # layer, so a workspace config or --browser still overrides it.
+        - command: |
+            set -e
+            mkdir -p "$HOME/.playwright"
+            [ -e "$HOME/.playwright/cli.config.json" ] || printf '%s\n' '{"browser":{"browserName":"chromium"}}' > "$HOME/.playwright/cli.config.json"
+          user: agent
+          description: Default playwright-cli to bundled Chromium
+
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        # Workflow tools
+
+        - `uv` / `uvx` — Python packages, venvs and scripts. Prefer
+          `uv run`, `uv add`, `uv pip` over bare pip.
+        - `nvm` — sourced from `/etc/profile.d` in login shells
+          (`bash -l`). Node 24 is the default; other versions: `nvm install <v>`.
+        - `playwright-cli` — browser automation CLI. Browsers
+          come from the sandbox template (Chromium in `/opt/ms-playwright`);
+          its agent skill is installed globally in `~/.claude/skills`.
+          `~/.playwright/cli.config.json` defaults it to Chromium; Chrome,
+          Firefox and WebKit are not installed.
+        - `stencil` — BigCommerce Stencil CLI (`stencil init`, `start`,
+          `push`, `pull`, `bundle`). It needs Node >= 24, which the
+          `/usr/local/bin/stencil` wrapper selects regardless of the
+          sandbox's own `node`. Use it directly; no need for npx.
+        - `git-lfs` is installed and configured system-wide
+          (`git lfs install --system`), so LFS-tracked files clone and
+          commit normally. `git lfs pull` fetches objects after a clone.
+        - `kit-node`, `kit-npm`, `kit-npx` — this kit's Node 24
+          regardless of which `node` is first on PATH.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context
+
+dockerfile: workflow-tools.dockerfile
